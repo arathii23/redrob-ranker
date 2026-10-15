@@ -1,296 +1,140 @@
-# Redrob Intelligent Candidate Ranker
+# Redrob Candidate Ranker
 
-**Team Ctrl+Alt+Defeat** — Ankit Kumar · Aaditya Rathi · Kshitiz Tyagi · Purabjeet Singh Bagga
+**Team Ctrl+Alt+Defeat:** Ankit Kumar, Aaditya Rathi, Kshitiz Tyagi, Purabjeet Singh Bagga
 
-Rank candidates for a job description the way a thoughtful recruiter would — by
-understanding what the role *means*, not by counting keywords.
+Ranks a candidate pool against the Senior AI Engineer (Founding Team) job description and writes a top-100 CSV with columns `candidate_id`, `rank`, `score`, and `reasoning`.
 
-This system reads the released JD (Senior AI Engineer — Founding Team), scores
-all 100,000 candidates in `candidates.jsonl`, and emits a spec-compliant
-top-100 CSV. The **ranking step runs CPU-only, fully offline, in ~45 seconds**
-on a laptop (peak RAM ~1.5 GB).
+The ranking step is CPU-only and does not use the network. On 100,000 candidates it takes about 45 seconds and peaks near 1.5 GB RAM.
 
----
+`candidates.jsonl` is not in this repository. Put `candidates.jsonl` or `candidates.jsonl.gz` at the repo root, or pass another path with `--candidates`. The default job description is `data/job_description.txt`.
 
-## TL;DR — reproduce the submission
+## Reproduce
 
 ```bash
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 
-# STEP 1 (one-time, offline-after-download, ~4.3 min on CPU):
-#   builds data/candidate_embeddings.npy + data/candidate_ids.json
+# Once. Writes data/candidate_embeddings.npy and data/candidate_ids.json.
+# About 4.3 minutes for 100,000 candidates. Offline after the model is cached.
 python scripts/precompute_embeddings.py --candidates ./candidates.jsonl
 
-# STEP 2 (the graded ranking step, ~45s, CPU-only, offline):
+# About 45 seconds. CPU-only, no network.
 python rank.py --candidates ./candidates.jsonl --out ./submission.csv
 
-# verify it passes the official validator
-python validate_submission.py ./submission.csv      # -> "Submission is valid."
+python validate_submission.py ./submission.csv
 ```
 
-The pool ships gzipped — `candidates.jsonl.gz` is read directly (no manual
-`gunzip` needed); pass it to either command.
+A `.gz` pool is read directly. On Windows, activate the venv with `.venv\Scripts\activate`.
 
-**Don't want to precompute?** Run with the TF-IDF backend, which needs no
-artifacts and builds its index inside the ~45s run:
+`--semantic-backend` defaults to `auto`. That uses the precomputed embeddings when `data/candidate_embeddings.npy` exists, and TF-IDF otherwise. To rank without the precompute step:
 
 ```bash
 python rank.py --candidates ./candidates.jsonl --out ./submission.csv --semantic-backend tfidf
 ```
 
-`--semantic-backend auto` (default) uses the precomputed embeddings if present
-and transparently falls back to TF-IDF otherwise.
+Before upload, rename `submission.csv` to the registered participant id, for example `team_xxx.csv`.
 
-> Place `candidates.jsonl[.gz]` at the repo root (or pass any path with
-> `--candidates`). The bundled JD lives at `data/job_description.txt`; override
-> with `--jd` if needed.
+## Sandbox
 
----
+Both options run the same scoring code on a sample of at most 100 candidates, with the TF-IDF backend. They do not download a model or require precomputed embeddings.
 
-## Sandbox / demo (spec Section 10.5)
-
-The spec requires a hosted environment that runs the ranker on a small sample
-(≤100 candidates) and returns a ranked CSV, within the CPU/5-min budget. This
-repo ships **two** ways to satisfy that — a Streamlit app and a self-contained
-Docker image. Both use the portable **TF-IDF backend** (no model download, no
-network, no precomputed artifacts) while exercising the *same* scoring,
-disqualifier, availability and reasoning code as the full submission.
-
-**Option A — Streamlit (HuggingFace Spaces / Streamlit Cloud, free tier):**
+Streamlit, for a local run or a Hugging Face / Streamlit Cloud app:
 
 ```bash
 pip install -r requirements-sandbox.txt
-streamlit run app.py            # local: http://localhost:8501
+streamlit run app.py
 ```
 
-To host: create a Streamlit Space (or Streamlit Cloud app) pointed at this repo,
-set the app file to `app.py` and the requirements file to
-`requirements-sandbox.txt`. It uploads a JSON/JSONL sample (or uses the bundled
-50-candidate `data/sample_candidates.json`) and returns a downloadable ranked
-CSV.
+Point the hosted app at `app.py` and `requirements-sandbox.txt`. With no upload, it ranks the bundled 50-candidate file `data/sample_candidates.json`.
 
-**Option B — self-contained Docker (`docker run` recipe, no hosting needed):**
+Docker:
 
 ```bash
 docker build -t redrob-ranker .
-
-# Demo: rank the bundled 50-candidate sample and print the CSV
 docker run --rm redrob-ranker
 
-# Reproduce on your own pool (mount the file + output dir)
 docker run --rm -v "$PWD":/data redrob-ranker \
   --candidates /data/candidates.jsonl --out /data/submission.csv \
   --semantic-backend tfidf
 ```
 
-The image installs only `requirements-core.txt` (numpy/scipy/scikit-learn), so
-it builds fast and runs CPU-only and offline. Per spec, this Docker recipe is an
-accepted alternative to a hosted sandbox — the Dockerfile builds and runs
-unmodified.
+The image installs `requirements-core.txt` only.
 
-> **Uploading the CSV:** the portal expects the file named as your registered
-> participant ID (e.g. `team_xxx.csv`). Rename `submission.csv` accordingly
-> before upload — content/format is unchanged and already passes
-> `validate_submission.py`.
+## Scoring
 
----
-
-## The problem, and why keyword matching fails
-
-The challenge is explicitly designed to punish keyword matching. The JD itself
-warns about it:
-
-- An **HR Manager who lists 9 "AI skills"** is *not* a fit, no matter how clean
-  the skill list looks. (The provided `sample_submission.csv` deliberately falls
-  for exactly this trap.)
-- A candidate who never writes "RAG" or "Pinecone" but whose **career history
-  shows they built a recommendation system at a product company** *is* a fit.
-- ~80 **honeypots** have subtly impossible profiles (e.g. *8 years at a company
-  that existed for 3*, or *"expert" in 10 skills with 0 months used*). The ground
-  truth forces them to tier 0; ranking >10% of them in your top 100 is
-  disqualifying.
-- A perfect-on-paper candidate who **hasn't logged in for months** and ignores
-  recruiters is, for hiring purposes, **not actually available** — down-weight.
-
-So the system is built around *role fit and evidence*, with skills as one signal
-among several — never the deciding one.
-
----
-
-## How it works
-
-A transparent, multi-signal pipeline. Every candidate gets a score in `[0, 1]`
-that is fully decomposable, which keeps it explainable (Stage 4/5) and naturally
-resistant to keyword stuffing.
+Each candidate gets a score in `[0, 1]`:
 
 ```
-                       (offline, one-time)
-candidates.jsonl ─► precompute_embeddings.py ─► candidate_embeddings.npy
-
-                       (ranking step, ~45s)
-JD text ─► structured rubric (must-haves, anti-titles, disqualifiers, location)
-                                   │
-candidates.jsonl ─► stream ─► per-candidate feature extraction (single pass)
-                                   │            │
-                                   │            └─► plausibility / honeypot check
-                                   ▼
-        semantic similarity to JD  (precomputed embeddings · or TF-IDF fallback)
-                                   ▼
-   score = Σ wᵢ·componentᵢ  ×  disqualifier_mult  ×  availability_mult   (honeypots ×0.02)
-                                   ▼
-            deterministic ordering (score ↓, then candidate_id ↑)
-                                   ▼
-                top-100  +  grounded reasoning  ─►  submission.csv
+score = (weighted components) × disqualifier × availability
 ```
 
-### Scoring components (base score, weights sum to 1.0)
+Profiles that fail the plausibility checks are multiplied by 0.02. Equal scores are ordered by `candidate_id` ascending. The CSV contains the top 100.
 
-| Component | Weight | What it captures |
+| Component | Weight | What is measured |
 |---|---:|---|
-| **Title fit** | 0.20 | On-target role (AI/ML/Search/NLP/Reco eng) vs anti-titles (HR/Marketing/Sales…). Generic eng titles (software/backend/data) are credited only in proportion to real AI signal; "Junior/Intern/Trainee" qualifiers are discounted (senior founding-team role); research-leaning titles are credited modestly. |
-| **Skills fit** | 0.22 | *Trust-weighted* coverage of skill families. Trust = proficiency × duration-of-use × endorsements × **platform-verified assessment score**, so "expert, 0 months used" or a low verified score ≈ 0. Evaluation frameworks (NDCG/MRR/MAP) carry full must-have weight. |
-| **Career evidence** | 0.22 | Free-text history mentions of retrieval/ranking/recommendation/production ML — the JD's #1 positive ("has shipped an end-to-end ranking/search/rec system") and the "hidden gem" signal. |
-| **Semantic fit** | 0.14 | Cosine of the candidate document to the JD — **all-MiniLM-L6-v2 embeddings** (precomputed) or TF-IDF (fallback). |
-| **Experience fit** | 0.12 | Proximity to the 5–9y band (ideal 6–8); drops steeply below ~5y so sub-band candidates don't outrank in-band ideal ones. |
-| **Location fit** | 0.10 | Pune/Noida > Tier-1 India > India > outside India (no visa sponsorship). `willing_to_relocate` partially offsets the penalty for relocatable candidates. |
+| Title | 0.20 | Match to AI/ML, search, NLP, and recommendation titles. Generic engineering titles are scaled by other AI evidence. Junior, intern, and trainee titles are reduced. |
+| Skills | 0.22 | Coverage of required skill families, weighted by proficiency, months of use, endorsements, and the platform assessment score. |
+| Career evidence | 0.22 | Work-history mentions of retrieval, ranking, recommendation, or production ML. |
+| Semantic | 0.14 | Cosine similarity between a short candidate document and the job description. |
+| Experience | 0.12 | Closeness to a 5–9 year range, with 6–8 years preferred. |
+| Location | 0.10 | Pune and Noida, then other Tier-1 Indian cities, then the rest of India, then outside India. `willing_to_relocate` lowers the penalty. |
 
-### Multiplicative modifiers (applied to the base score)
+The disqualifier multiplier is floored at 0.30. It covers mostly services or consulting careers, a research title with no production evidence, CV/speech/robotics work without NLP or information retrieval, framework-only profiles, and a run of short stints.
 
-- **Disqualifiers** (the JD's "do NOT want" list): mostly-services/consulting
-  career (detected by named firms *and* services industries), **research-leaning
-  title with no production-deployment evidence** (the JD's explicit "pure
-  research without production" exclusion), CV/speech/robotics without NLP/IR,
-  framework-hype-only (LangChain with no deeper retrieval depth), frequent short
-  stints (title-chasing). Soft penalties (floored at 0.30) — the JD says
-  "probably not", not "never".
-- **Availability** (clamped 0.40–1.05): recruiter response rate, recency of
-  activity, open-to-work, notice period, plus two sub-factors surfaced
-  separately in the score breakdown —
-  - *market interest*: recruiter-saves and search-appearances in the last 30d,
-    scored **relative to the pool's own median/p90** (not a hardcoded threshold);
-  - *engagement/credibility*: profile completeness, interview-completion
-    reliability, and GitHub activity (the JD values open-source builders).
-- **Honeypots**: profiles failing plausibility checks are multiplied by 0.02,
-  forcing them to the bottom. We catch ~65 of the ~80 with general impossibility
-  rules and **zero false positives** — we never special-case IDs.
+The availability multiplier stays in `[0.40, 1.05]`. It uses recruiter response rate, last activity, open-to-work, notice period, profile completeness, interview completion, GitHub activity, and recruiter saves plus search appearances relative to this pool’s median and 90th percentile.
 
-### Semantic backend: precomputed embeddings (default), TF-IDF (fallback)
+Semantic backends:
 
-The semantic component compares each candidate's document to the JD. We support
-two interchangeable backends behind `--semantic-backend`:
+- `embeddings` uses `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions, about 80 MB). `scripts/precompute_embeddings.py` embeds the pool once. Ranking embeds the job description only and multiplies it against the saved matrix.
+- `tfidf` builds a word-bigram TF-IDF index during the ranking run.
 
-- **`embeddings` (default via `auto`)** — `sentence-transformers/all-MiniLM-L6-v2`
-  (~80 MB, 384-dim, CPU-friendly). Embeddings for the 100K pool are **precomputed
-  once** (`scripts/precompute_embeddings.py`, ~13 min) and saved to
-  `data/candidate_embeddings.npy`. At ranking time we load that matrix and embed
-  **only the single JD string**, then take a cosine — a sub-second matrix-vector
-  product. The model is cached locally after the first download, so both steps
-  run **offline**. This captures semantic fit beyond lexical overlap (the
-  "hidden gem" histories), which is the main NDCG lever.
-- **`tfidf`** — word-bigram TF-IDF cosine, built inside the ranking run. Needs
-  **no model weights, no network, no precomputed artifacts**, so the repo still
-  runs end-to-end even where `sentence-transformers` can't be installed or the
-  embeddings artifact is absent. `auto` falls back to this (with a printed
-  notice) if the artifacts/model aren't available.
+The `reasoning` column is filled from fields on that profile: current title, years of experience, skills present on the record, location, and the score breakdown.
 
-In an A/B on the full pool the two backends agree on 8/10 of the top-10 and
-84/100 of the top-100, with the embeddings backend reordering the rest by
-semantic understanding of the free-text histories.
-
----
-
-## Reasoning quality
-
-The `reasoning` column is generated **only from facts in the candidate's
-profile** (current title, years, named skills that actually exist, real signal
-values) and is tone-matched to the rank — strong picks read as strong, low picks
-acknowledge gaps honestly. No invented skills, no templated name-insertion.
-
-Example (rank 6, outside India):
-> *Senior Machine Learning Engineer with 8.1 yrs, based in London; directly
-> relevant experience for the embeddings/retrieval/ranking mandate; core skills
-> include Elasticsearch, Hugging Face Transformers, Python; recruiter response
-> rate 87%. Concern: located outside India (UK).*
-
----
-
-## Repository layout
+## Layout
 
 ```
-redrob-ranker/
-├── rank.py                       # CLI entrypoint (the graded ranking step)
-├── app.py                        # Streamlit sandbox (spec Section 10.5)
-├── Dockerfile                    # self-contained sandbox / repro image
-├── scripts/precompute_embeddings.py  # offline, one-time embedding precomputation
-├── validate_submission.py        # official validator (copied from the bundle)
-├── requirements.txt              # full deps (ranking + embeddings)
-├── requirements-core.txt         # minimal deps (TF-IDF ranking only)
-├── requirements-sandbox.txt      # sandbox deps (core + streamlit)
-├── submission_metadata.yaml      # portal metadata mirror
-├── src/redrob_ranker/
-│   ├── jd_spec.py                # structured understanding of the JD (the rubric)
-│   ├── io_utils.py               # streaming JSONL/JSONL.gz reader + CSV writer
-│   ├── features.py               # per-candidate feature extraction + text doc
-│   ├── plausibility.py           # honeypot / internal-consistency detection
-│   ├── retrieval.py              # TF-IDF semantic backend (fallback)
-│   ├── retrieval_dense.py        # embeddings semantic backend (default)
-│   ├── scoring.py                # multi-signal weighted scoring + modifiers
-│   ├── reasoning.py              # grounded, varied reasoning generation
-│   └── pipeline.py               # orchestration + backend selection
-├── tests/test_pipeline.py        # sanity tests on the bundled sample
-├── data/                         # JD text, schema, samples; embeddings artifacts (gitignored)
-└── outputs/                      # generated submission.csv
+rank.py                              CLI for the ranking step
+app.py                               Streamlit sandbox
+Dockerfile
+scripts/precompute_embeddings.py
+validate_submission.py
+requirements.txt                     ranking and embeddings
+requirements-core.txt                TF-IDF ranking only
+requirements-sandbox.txt             core plus Streamlit
+submission_metadata.yaml
+src/redrob_ranker/
+  jd_spec.py                         job-description rubric
+  features.py                        per-candidate features
+  plausibility.py                    internal-consistency checks
+  retrieval.py                       TF-IDF backend
+  retrieval_dense.py                 embedding backend
+  scoring.py
+  reasoning.py
+  pipeline.py
+tests/test_pipeline.py
+data/                                job description, schema, samples
+outputs/                             generated submission.csv
 ```
 
-## Compute profile (measured on 100K, Apple Silicon laptop, CPU-only)
+`data/candidate_embeddings.npy` and `data/candidate_ids.json` are gitignored. The embedding matrix is about 153 MB and is rebuilt by the precompute script.
 
-| Step | Wall-clock | In 5-min budget? |
-|---|---|---|
-| Precompute embeddings (one-time) | **~4.3 min** (11s docs + ~245s embed) | ✅ yes (separate step) |
-| Ranking — embeddings backend | **~43s** (parse ~34s · semantic ~8s · score <1s) | ✅ yes |
-| Ranking — tfidf backend | **~46s** | ✅ yes |
+## Runtime
 
-Precompute is fast enough to also finish under 5 min: it embeds a **compact,
-front-loaded document** (titles + skills + truncated summary) at a capped
-sequence length (96 tokens) using all CPU cores. Verbose role descriptions are
-omitted from the embedding (the career-evidence component already scans them in
-full), which cuts embedding time ~3x with negligible ranking change (91/100
-top-100 overlap vs. embedding the full document).
+Measured on an Apple Silicon laptop, 8 CPU cores, 16 GB RAM. No GPU. No network during ranking.
 
-- Ranking-step peak RAM **~1.5 GB** (well under 16 GB); CPU-only; no network.
-- Deterministic: same input → same output (stable tie-break by `candidate_id`).
+| Step | Time |
+|---|---|
+| Precompute embeddings, once | ~4.3 min |
+| Rank with embeddings | ~43 s |
+| Rank with TF-IDF | ~46 s |
+
+The same input produces the same CSV.
 
 ## Tests
 
 ```bash
-PYTHONPATH=src python -m pytest tests/ -q     # or: python tests/test_pipeline.py
+PYTHONPATH=src python -m pytest tests/ -q
 ```
 
-Coverage includes: score range/monotonicity, on-target > off-target titles,
-honeypots sinking, grounded/varied reasoning, **platform-verified assessment
-discounting an inflated self-claim**, and the **github-zero ≠ missing** bug fix.
-
-## Submission checklist (mapped to the spec)
-
-| Spec requirement | Status |
-|---|---|
-| CSV: `candidate_id,rank,score,reasoning`, exactly 100 rows, ranks 1–100 unique, score non-increasing, ties by `candidate_id` | ✅ passes `validate_submission.py` |
-| Ranking step: ≤5 min, ≤16 GB, CPU-only, no network, ≤5 GB disk | ✅ ~43s, ~1.5 GB RAM, offline |
-| Grounded, varied, honest, non-hallucinated reasoning | ✅ generated from profile facts only |
-| Honeypot rate in top 100 | ✅ 0% |
-| Single reproduce command in README | ✅ `python rank.py --candidates ./candidates.jsonl --out ./submission.csv` |
-| Precomputation documented separately | ✅ `scripts/precompute_embeddings.py` |
-| `requirements.txt` with pinned versions | ✅ (+ `requirements-core.txt`, `requirements-sandbox.txt`) |
-| `submission_metadata.yaml` at repo root | ✅ team details filled |
-| Sandbox / demo | ✅ Streamlit `app.py` + Docker recipe (deploy one to publish the hosted URL) |
-
-## Limitations & future work
-
-- **Recall is exhaustive, not ANN-indexed** — fine at 100K/45s, but a FAISS/HNSW
-  ANN index over the precomputed embeddings plus a cross-encoder re-ranker on the
-  top ~200 would likely lift NDCG@10 further.
-- Honeypot detection is intentionally conservative (precision over recall); the
-  broader role/evidence scoring keeps undetected honeypots out of the top anyway.
-- Component weights are hand-set from reading the JD; with labeled data they
-  could be tuned via learning-to-rank.
+`python tests/test_pipeline.py` runs the same checks without pytest.
